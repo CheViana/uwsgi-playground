@@ -115,10 +115,10 @@ To install wrk2:
 
 To run wrk2:
 
-    > ./wrk -t2 -c16 -d3600s -R16 http://127.0.0.1:9090/
+    > ./wrk -t2 -c2 -d1200s -R1 http://127.0.0.1:9090/
 
-This command creates 2 threads that try to load :9090 webserver with 16 RPS, keeping 16 HTTP connections open.
-It will create load for 3600 sec which is one hour. Feel free to adjust.
+This command creates 2 threads that try to load :9090 webserver with 1 RPS, keeping 2 HTTP connections open.
+It will create load for 1200 sec which is 20 min. Feel free to adjust.
 
 
 ## Tools for real-time monitoring: graphana, telegraf, influxdb (also known as TIG stack)
@@ -129,21 +129,23 @@ To install all tools locally, execute (on MacOS):
     > brew install telegraf  <-- agent-collector of metrics
     > brew install graphana  <-- UI for metrics exploration and plotting
 
-On Linux:
+On Linux and other platforms: go to https://portal.influxdata.com/downloads/ for InfluxDB and telegraf, for Grafana visit https://grafana.com/grafana/download .
 
+
+### Setup metrics database InfluxDB
 
 Launch influxDB:
 
-    influxd -config /usr/local/etc/influxdb.conf
+    > influxd -config /usr/local/etc/influxdb.conf
 
 
 Create database for local playground metrics (using CLI in other shell tab):
 
-    influx -precision rfc3339
+    > influx -precision rfc3339  <-- opens CLI
     Connected to http://localhost:8086 version v1.8.1
     InfluxDB shell version: v1.8.1
-    > CREATE DATABASE localmetrics
-    > SHOW DATABASES
+    > CREATE DATABASE localmetrics  <-- creates our DB
+    > SHOW DATABASES  <-- shows DB list
     name: databases
     name
     ----
@@ -152,6 +154,8 @@ Create database for local playground metrics (using CLI in other shell tab):
     >
 
 It is now possible to run "INSERT ..." command using CLI, which will add metric reading to the database.
+
+### Telegraf - stats pull/push agent
 
 We want to have uWSGI stats (data in that JSON) sent to database automatically, e.g. every 5 seconds, and in format that InfluxDB will understand.
 Also uWSGI passively exposes stats data on socket 9191, so request on that socket will result in response with stats JSON, but if nobody is executing requests on 9191 socket - stats are not known to anybody (except uWSGI process itself because it uses stats to e.g. know when to respawn worker processes).
@@ -214,6 +218,10 @@ Looking in InfluxDB console output, can see:
     [httpd] 127.0.0.1 - - [19/Jul/2020:21:19:10 -0400] "POST /write?db=uWSGI HTTP/1.1" 204 0 "-" "Telegraf/1.14.5" 0388c512-ca27-11ea-8009-88e9fe853b3a 9345
 
 So telegraf is busy writing uWSGI metrics to database but we can't see them yet. Let's improve on it.
+
+
+### Grafana - UI for metrics monitoring
+
 Launch grafana web server:
 
     > cd path/to/dir/with/installed/graphana
@@ -223,6 +231,7 @@ Navigating to http://localhost:3000/ in browser opens window with Grafana UI. Lo
 Pick "Configuration -> Data Sources -> Add data source" [pic 2]. Select InfluxDB.
 Put "http://127.0.0.1:8086" in HTTP/URL input and database name "uWSGI" in "InfluxDB Details/Database" input [pic 3].
 Click on "Save and Test" button in the bottom of the screen, green noty reading "Data source is working" should appear [pic 4].
+
 
 ## Visualize uWSGI metrics
 
@@ -234,7 +243,8 @@ To setup uwsgi-monitoring dashboard, can use JSON in uwsgi-dashboard-model.json,
 - Go to "Dashboards -> Manage dashboards", click on "New dashboard".
 - Go to Dashboard settings ("wheel" button at the top right of the page with new dashboard)
 - In left menu pick "JSON Model"
-- past dashboard JSON there and click "Save changes".
+- In JSON need to find field "panels" (it's empty) and paste there contents of field "panels" from uwsgi-dashboard-model.json. Pasting all JSON doesn't work for me for some reason.
+- Click "Save changes" at the bottom of Dashboard settings page.
 [pic 8] and [pic 9]
 
 
@@ -388,3 +398,7 @@ Query:
     SELECT mean("running_time") FROM "uwsgi_workers" WHERE  $timeFilter GROUP BY time($interval), "worker_id"
 
 
+
+## Conclusions
+
+...
