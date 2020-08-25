@@ -1,39 +1,72 @@
-# Monitoring uWSGI stats using InfluxDB/Grafana/telegraf (TIG) - from scratch
+---
+title: uWSGI stats monitoring from scratch using TIG stack
+published: false
+description: 
+tags: #uwsgi #uwsgistats #grafana #TIG
+cover_image: https://dev-to-uploads.s3.amazonaws.com/i/7upkfl3hzj7xv79ta7zz.png
+---
 
-## Prerequisite
+At the end of this tutorial, you'll end up with [dashboard like this](https://snapshot.raintank.io/dashboard/snapshot/Y71MST4SUXUnJaqYyakeKRagjmcl1SyC). Each panel shows some uWSGI metric as time series.
 
-It might be that reader has typical nginx-uWSGI-Python web app setup and is wondering how to monitor all of that, in production and/or during testing.
-I find monitoring uWSGI stats really helps when determining optimal uWSGI server configuration, for comparing different configurations.
-Hope this post will be useful for understanding how to setup local monitoring environment of uWSGI web server, and it's possible to setup similar tools in (any?) cloud environment.
-In future, I plan to add posts about how to monitor Python web app aspects as well as system resources consumption, using same tools.
+![uWSGI stats, changing in time](https://dev-to-uploads.s3.amazonaws.com/i/88esovg47ken2a2ohg5x.png)
 
-## uWSGI stats and monitoring stack
+Watching over uWSGI-reported statistics like worker busyness is super helpful for investigating uWSGI configurations. Also useful in production environment - it's possible to extend described approach to monitor real-life uWSGI web applications, but this post doesn't aim to cover that.
 
-uWSGI can expose stats on separate socket. There are a lot of ways to monitor uWSGI stats. 
-Simplest way is to use uwsgitop - https://github.com/xrmx/uwsgitop. However uwsgitop only shows current metrics readings, no history data, just like Linux `top` command. (Some time ago I created a fork of uwsgitop because of encoding-related bug in output, but that bug seems to be fixed now)
+In future, I plan to add posts about how different uWSGI options influence behavior of web server, and how to monitor Python web app aspects, such as networking, using same tools.
 
-I think it's nicer to be able to see uWSGI stats metrics over continuous periods of time as it provides more information than just this moment readings.
-It helps to see how the level of load affects web server stats when trying to find best web server configuration.
 
-One option is to use Prometeus with exporter for uWSGI stats, here I'll describe other option - TIG stack.
-TIG stack differs from Prometeus mainly in the idea of relying on some other tool to push metrics to time series DB, instead of pulling model which Prometeus uses. Actually, both of the stacks can do push and pull, and there's discussion going on about which method works better for which type of monitoring - https://giedrius.blog/2019/05/11/push-vs-pull-in-monitoring-systems/ . Prometeus is really popular approach as it works well in Kubernetes environment.
-For kind of local comparative experiments I'm planning to run on uWSGI web servers in following posts, I don't think there's difference: can use either monitoring stack.
-I picked TIG for this post because I have some experience with these technologies, and because Prometeus approach is described elsewhere - https://www.apsl.net/blog/2018/10/01/using-prometheus-monitoring-django-applications-kubernetes/ .  (Prometeus uwsgi-exporter can be found at https://github.com/timonwong/uwsgi_exporter . As of now, it seems to not support reporting of uwsgi worker status which is indeed very useful metric - https://github.com/timonwong/uwsgi_exporter/issues/21)
+## Tutorial roadmap
 
-Here's what will be desribed in this post:
-- setup simple uWSGI webserver
+Here's what will be described:
+- setup and run simple uWSGI webserver
 - load that webserver using wrk2
 - install and run InfluxDB
-- install and run telegraf
+- install, configure and run Telegraf
 - install and run Grafana
 - create dashboard in Grafana to show uWSGI metrics
-- talk a bit about each metric
+- each monitored uWSGI metric dive-in
 
-Most of code and configs found in this tutorial can be found in [repo].
+Code and configs mentioned in here can be found in the [repo](https://github.com/CheViana/uwsgi-playground-monitoring).
+
+
+## The diagram
+
+![Diagram of uWSGI webserver and monitoring tools](https://dev-to-uploads.s3.amazonaws.com/i/0ybme0sza9l4ztb689ei.jpg)
+
+
+## uWSGI stats
+
+uWSGI can [expose stats](https://uwsgi-docs.readthedocs.io/en/latest/StatsServer.html) on a separate socket. 
+
+The simplest way to see these metrics is to use `uwsgitop` - https://github.com/xrmx/uwsgitop. However, `uwsgitop` only shows current metrics readings, not history data, just like Linux `top` command. 
+
+Some time ago I created a [fork](https://github.com/CheViana/uwsgitop) of `uwsgitop` because of an encoding-related bug in its output. I had fun a time trying to figure out why `uwsgitop` won't work. That bug seems to be fixed now though.
+
+I think it's nicer to be able to see *uWSGI stats metrics over a continuous period of time* as that provides more information than just this moment readings. 
+
+`uwsgitop` is like a speedometer readings - change every second. ⌚
+
+Monitoring dashboard is like a cardiogram - recorded readings over time. 📈
+
+
+## Choosing monitoring tools
+
+One option for continuous monitoring is to use Prometheus with exporter for uWSGI stats; here, I'll describe other option - [TIG stack](https://hackernoon.com/monitor-your-infrastructure-with-tig-stack-b63971a15ccf).
+
+TIG stack differs from Prometheus mainly in the idea of relying on some other tool to push metrics to time series DB, instead of pulling model which Prometheus uses. Actually, both of the stacks can do push and pull, and there's [discussion](https://giedrius.blog/2019/05/11/push-vs-pull-in-monitoring-systems/) going on about [which method works better](https://prometheus.io/docs/introduction/comparison/) for which type of thing you want to watch over. 
+
+For the kind of local comparative experiments I'm planning to run on uWSGI web servers in following posts, *I don't think there's much difference* which monitoring solution to use.
+
+I picked TIG for this post because I have some experience with it and Prometheus approach is described [elsewhere](https://www.apsl.net/blog/2018/10/01/using-prometheus-monitoring-django-applications-kubernetes/).
+
+One little pebble thrown in the direction of Prometheus: its [uwsgi-exporter](https://github.com/timonwong/uwsgi_exporter) seems to [not support](https://github.com/timonwong/uwsgi_exporter/issues/21) reporting of uWSGI worker status which is indeed very useful metric. Probably support for that will be added in time.
+
+List of what Telegraf uWSGI plugin can monitor is [rather impressive](https://github.com/influxdata/telegraf/tree/master/plugins/inputs/uwsgi).
+
 
 ## Simple uWSGI web server
 
-Here's code of "Hello World" uWSGI app in uwsgi-hello-world.py:
+Here's code of "Hello World" uWSGI app in [uwsgi-hello-world.py](https://github.com/CheViana/uwsgi-playground-monitoring/blob/master/uwsgi-hello-world.py):
 
     import time
 
@@ -43,7 +76,7 @@ Here's code of "Hello World" uWSGI app in uwsgi-hello-world.py:
         time.sleep(0.25)  # sleep 250 msec
         return [b'Hello World']
 
-And basic uWSGI configs in uwsgi-hello-world-configs.ini:
+And basic uWSGI configs in [uwsgi-hello-world-configs.ini](https://github.com/CheViana/uwsgi-playground-monitoring/blob/master/uwsgi-hello-world-configs.ini):
 
     [uwsgi]
     http-socket = 127.0.0.1:9090
@@ -54,8 +87,10 @@ And basic uWSGI configs in uwsgi-hello-world-configs.ini:
     stats = 127.0.0.1:9191
     stats-http = true
 
-This code doesn't do anything useful. Can use wsgi.py of your Django or Flask server or any other Python web app (wsgi = path/to/Django-app/wsgi.py), should be perfectly alright, and probably more interesting.
-uWSGI can be installed as Python package to virtual environment. Let's assume you know how to create and activate Python virtual env (if not, please consult https://virtualenv.pypa.io/en/latest/index.html). 
+This code doesn't do anything useful. Worker sleeps for 250 msec and returns a string.
+Can use `wsgi.py` of more interesting Django or Flask server or any other Python web app (change `wsgi = path/to/Django-app/wsgi.py` in options).
+
+uWSGI can be installed as Python package. Let's assume you have [Python installed](https://www.python.org/downloads/), know how to create and activate Python virtual environment (if not, please consult [virtualenv docs](https://virtualenv.pypa.io/en/latest/index.html) and [virtualenvwrapper is handy](https://virtualenvwrapper.readthedocs.io/en/latest/)). 
 
 To install uWSGI Python package:
 
@@ -66,7 +101,7 @@ To run uWSGI server:
 
     > uwsgi --ini uwsgi-hello-world-configs.ini
 
-Should produce output similar to:
+That last command should produce output similar to:
 
     ...
     uwsgi socket 0 bound to TCP address 127.0.0.1:9090
@@ -80,9 +115,19 @@ Should produce output similar to:
     spawned uWSGI worker 4 (pid: ..., cores: 2)
     *** Stats server enabled on 127.0.0.1:9191 fd: ... ***
 
-It means web server has launched and it's listening on port 127.0.0.1:9090.
-Can visit hello-world server in local web browser - on http://127.0.0.1:9090/ - will see something like [pic 1].
-Can also visit stats endpoint in local web browser - on http://127.0.0.1:9191/  - will see JSON recembling following:
+This means that the web server has launched and it's listening on port 9090.
+
+Can visit hello-world server in local web browser - on `http://127.0.0.1:9090/`: 
+![hello world web server response](https://dev-to-uploads.s3.amazonaws.com/i/onn0zzkbiijrvbz1b4ji.png)
+
+uWSGI process outputs to console that it processed requests after we visited hello-world page:
+
+    [pid: ...|app: 0|req: 1/1] 127.0.0.1 () {42 vars in 783 bytes} [Sun Jul 19 20:21:38 2020] GET / => generated 11 bytes in 250 msecs (HTTP/1.1 200) 1 headers in 44 bytes (2 switches on core 0)
+    [pid: ...|app: 0|req: 1/2] 127.0.0.1 () {38 vars in 670 bytes} [Sun Jul 19 20:21:38 2020] GET /favicon.ico => generated 11 bytes in 143 msecs (HTTP/1.1 200) 1 headers in 44 bytes (2 switches on core 0)
+
+uWSGI can also be configured to log those lines to a file (see [uWSGI logging docs](https://uwsgi-docs.readthedocs.io/en/latest/Logging.html)).
+
+Can also visit stats endpoint in local web browser - on `http://127.0.0.1:9191/`:
 
     ...
     "workers": [
@@ -97,49 +142,67 @@ Can also visit stats endpoint in local web browser - on http://127.0.0.1:9191/  
     ]
     ...
 
-uWSGI outputs to console that it processed requests after we visited those pages:
+That JSON contains "speedometer" readings of what's going on inside uWSGI webserver.
 
-    [pid: ...|app: 0|req: 1/1] 127.0.0.1 () {42 vars in 783 bytes} [Sun Jul 19 20:21:38 2020] GET / => generated 11 bytes in 250 msecs (HTTP/1.1 200) 1 headers in 44 bytes (2 switches on core 0)
-    [pid: ...|app: 0|req: 1/2] 127.0.0.1 () {38 vars in 670 bytes} [Sun Jul 19 20:21:38 2020] GET /favicon.ico => generated 11 bytes in 143 msecs (HTTP/1.1 200) 1 headers in 44 bytes (2 switches on core 0)
-
-uWSGI can also be configured to log those lines to a file (see uWSGI options docs on how to set it up).
 
 ## Loading web server with benchmark tool wrk2
 
-To keep uWSGI web server busy, let's load uWSGI hello-world server using wrk2 benchmarking tool - https://github.com/giltene/wrk2. Can use any other load generator: here's overview of a bunch of them https://k6.io/blog/comparing-best-open-source-load-testing-tools . I picked wrk2 because I don't need complicated test scenario for this post, otherwise would pick something else. Some load testing tools can be configured to write to InfluxDB as well, which makes observing results of load test real easy.
+To keep uWSGI web server busy (so that stats are not just all zero), let's load uWSGI hello-world server using [`wrk2` benchmarking tool](https://github.com/giltene/wrk2). Can use [any other artificial load generator](https://k6.io/blog/comparing-best-open-source-load-testing-tools). I picked `wrk2` because I don't need complicated test scenario for this post. Some load testing tools can be easily configured to write to InfluxDB, which makes observing results of load test real handy, right next to web server stats and stats reported from web app code.
+
 To install wrk2:
 
     > git clone https://github.com/giltene/wrk2
     > cd wrk2
     > make
 
-To run wrk2:
+If `make` doesn't work for you, can use `wrk` tool - which provides [install wiki pages](https://github.com/wg/wrk/wiki/Installing-wrk-on-Mac-OS-X) for all platforms.
+
+To run wrk2 or wrk:
 
     > ./wrk -t2 -c2 -d1200s -R1 http://127.0.0.1:9090/
 
-This command creates 2 threads that try to load :9090 webserver with 1 RPS, keeping 2 HTTP connections open.
+This command creates 2 threads that try to load webserver with 1 RPS, keeping 2 HTTP connections open.
 It will create load for 1200 sec which is 20 min. Feel free to adjust.
 
 
-## Tools for real-time monitoring: graphana, telegraf, influxdb (also known as TIG stack)
+## Tools for real-time monitoring: Graphana, Telegraf, InfluxDB (also known as TIG stack)
 
-To install all tools locally, execute (on MacOS):
+
+To install all tools locally on MacOS:
 
     > brew install influxdb  <-- Database for metrics
     > brew install telegraf  <-- agent-collector of metrics
     > brew install graphana  <-- UI for metrics exploration and plotting
 
-On Linux and other platforms: go to https://portal.influxdata.com/downloads/ for InfluxDB and telegraf, for Grafana visit https://grafana.com/grafana/download .
+To download all tools binaries locally on Linux:
+
+    > wget https://dl.influxdata.com/influxdb/releases/influxdb-1.8.2_linux_amd64.tar.gz
+    > tar xvfz influxdb-1.8.2_linux_amd64.tar.gz
+    > wget https://dl.influxdata.com/telegraf/releases/telegraf-1.15.2_linux_amd64.tar.gz
+    > tar xf telegraf-1.15.2_linux_amd64.tar.gz
+    > wget https://dl.grafana.com/oss/release/grafana-7.1.4.linux-amd64.tar.gz
+    > tar -zxvf grafana-7.1.4.linux-amd64.tar.gz
+   
+
+For other platforms:
+-  go to https://portal.influxdata.com/downloads/ for InfluxDB and Telegraf
+- for Grafana visit https://grafana.com/grafana/download
+
+Docker containers available in [this post](https://hackernoon.com/monitor-your-infrastructure-with-tig-stack-b63971a15ccf), or:
+
+    > docker pull influxdb
+    > docker pull telegraf
+    > docker run -d --name=grafana -p 3000:3000 grafana/grafana
 
 
-### Setup metrics database InfluxDB
+### Run time series database InfluxDB
 
-Launch influxDB:
+Launch InfluxDB:
 
     > influxd -config /usr/local/etc/influxdb.conf
 
-
-Create database for local playground metrics (using CLI in other shell tab):
+This starts up DB process.
+Create database for uWSGI metrics (in other shell tab):
 
     > influx -precision rfc3339  <-- opens CLI
     Connected to http://localhost:8086 version v1.8.1
@@ -155,18 +218,18 @@ Create database for local playground metrics (using CLI in other shell tab):
 
 It is now possible to run "INSERT ..." command using CLI, which will add metric reading to the database.
 
-### Telegraf - stats pull/push agent
 
-We want to have uWSGI stats (data in that JSON) sent to database automatically, e.g. every 5 seconds, and in format that InfluxDB will understand.
-Also uWSGI passively exposes stats data on socket 9191, so request on that socket will result in response with stats JSON, but if nobody is executing requests on 9191 socket - stats are not known to anybody (except uWSGI process itself because it uses stats to e.g. know when to respawn worker processes).
-Need something that will query uWSGI stats endpoint and send it to InfluxDB database.
-This is where Telegraf comes to light. Telegraf has ability to retrieve metrics data, transform it to format InfluxDB understands and send it over to InfluxDB database.
-Telegraf has a bunch of input plugins: to watch over system cpu, to read log file tail, to listen to messages on socket, etc, and various web servers integrations, including uWSGI.
-Telegraf uWSGI plugin can be found at https://github.com/influxdata/telegraf/tree/master/plugins/inputs/uwsgi and they have quite a list of exposed metrics.
-It's a matter of adding few lines to telegraf config and it will consume uWSGI stats.
+### Run Telegraf - stats pull/push agent
 
-For now, we will start telegraf with with uWSGI input plugin only.
-Let's use telegraf sample-config utility to compose it's configs:
+We want to have uWSGI stats sent to database automatically every N seconds, and in a format that InfluxDB will understand.
+uWSGI passively exposes stats data on socket 9191.
+Need something that will query uWSGI stats endpoint and send metrics data to InfluxDB database.
+
+This is where Telegraf comes into light. Telegraf has ability to retrieve metrics data, transform it to format InfluxDB understands using plugins and send it over to InfluxDB database.
+Telegraf has a bunch of input plugins: to watch over CPU consumption levels, to read and parse log file tail, to listen to messages on socket and various web servers integrations, including uWSGI.
+
+It's a matter of adding a few lines to Telegraf config to enable uWSGI stats reporting. Resulting telegraf.conf is available in [repo](https://github.com/CheViana/uwsgi-playground-monitoring/blob/master/telegraf.conf).
+To understand Telegraf tool better, let's use telegraf sample-config utility to compose configs with which telegraf can consume uWSGI metrics:
 
     > telegraf -sample-config --input-filter uwsgi --output-filter influxdb > telegraf.conf
     > cat telegraf.conf
@@ -180,11 +243,12 @@ Let's use telegraf sample-config utility to compose it's configs:
     ## servers = ["tcp://localhost:5050", "http://localhost:1717", "unix:///tmp/statsock"]
     servers = ["tcp://127.0.0.1:1717"]
 
-    ## General connection timout
+    ## General connection timeout
     # timeout = "5s"
 
-tcp://127.0.0.1:1717 part doesn't match where our uWSGI exposes stats on. It's http://127.0.0.1:9191. Need to update that in telegraf.conf file.
-Another thing that needs to be updated is the address of where to write stats to:
+`tcp://127.0.0.1:1717` part doesn't match where our uWSGI exposes stats on. It's `http://127.0.0.1:9191`. Need to update that in `telegraf.conf` file.
+
+Another thing that needs to be updated is the address of where to send stats:
 
     # Configuration for sending metrics to InfluxDB
     [[outputs.influxdb]]
@@ -201,7 +265,8 @@ Another thing that needs to be updated is the address of where to write stats to
     database = "uWSGI"
 
 I uncommented `urls = ["http://127.0.0.1:8086"]` line and added `database = "uWSGI"` so metrics from uWSGI stats server will flow in separate database.
-Resulting config for telegrad is included in repo as telegraf.conf.
+
+Resulting telegraf.conf is in the [repo](https://github.com/CheViana/uwsgi-playground-monitoring/blob/master/telegraf.conf).
 
 To run telegraf:
 
@@ -217,51 +282,44 @@ Looking in InfluxDB console output, can see:
     [httpd] 127.0.0.1 - - [19/Jul/2020:21:19:00 -0400] "POST /write?db=uWSGI HTTP/1.1" 204 0 "-" "Telegraf/1.14.5" fd928134-ca26-11ea-8008-88e9fe853b3a 8534
     [httpd] 127.0.0.1 - - [19/Jul/2020:21:19:10 -0400] "POST /write?db=uWSGI HTTP/1.1" 204 0 "-" "Telegraf/1.14.5" 0388c512-ca27-11ea-8009-88e9fe853b3a 9345
 
-So telegraf is busy writing uWSGI metrics to database but we can't see them yet. Let's improve on it.
+This means Telegraf is already busy writing uWSGI metrics to database, but we can't see them yet.
 
 
-### Grafana - UI for metrics monitoring
+### Run Grafana - UI for metrics monitoring
 
 Launch grafana web server:
 
     > cd path/to/dir/with/installed/graphana
     > bin/grafana-server
 
-Navigating to http://localhost:3000/ in browser opens window with Grafana UI. Login using "admin" "admin" and create new pass as it asks to.
-Pick "Configuration -> Data Sources -> Add data source" [pic 2]. Select InfluxDB.
-Put "http://127.0.0.1:8086" in HTTP/URL input and database name "uWSGI" in "InfluxDB Details/Database" input [pic 3].
-Click on "Save and Test" button in the bottom of the screen, green noty reading "Data source is working" should appear [pic 4].
+Navigating to `http://localhost:3000/` in browser opens window with Grafana UI. Login using "admin" "admin" and create new pass as it asks to.
+
+I'm providing screenshots of how to deal with Grafana UI as it was confusing to me. Here Grafana version v7.1.0 is featured on screenshots, UI might look different for other version.
+
+What's left to setup:
+- create data source in Grafana for InfluxDB
+- add panels that will show metrics readings over time - can do "import it all" way, can do manually
 
 
-## Visualize uWSGI metrics
+### Create InfluxDB data source in Grafana
 
-Now Graphana can read metrics from database, let's visualize them.
-Grafana dashboard consists of panels, panel can show how particular metric changed in time. There are lots of types of panels but we will only deal with Time Series panel in this tutorial.  
-Here's dashboard snapshot with measurements of hello-world app with 4 workers being loaded by artificial users. - https://snapshot.raintank.io/dashboard/snapshot/IFfCGXltm0Z6Kz5T65Vf0UGfEsWEaKpN
+Pick "Configuration -> Data Sources -> Add data source". Select InfluxDB.
+![Grafana configuration menu](https://dev-to-uploads.s3.amazonaws.com/i/axtsfvi7tq1yacl2tnv6.png)
 
-To setup uwsgi-monitoring dashboard, can use JSON in uwsgi-dashboard-model.json, and export that to new dashboard:
-- Go to "Dashboards -> Manage dashboards", click on "New dashboard".
-- Go to Dashboard settings ("wheel" button at the top right of the page with new dashboard)
-- In left menu pick "JSON Model"
-- In JSON need to find field "panels" (it's empty) and paste there contents of field "panels" from uwsgi-dashboard-model.json. Pasting all JSON doesn't work for me for some reason.
-- Click "Save changes" at the bottom of Dashboard settings page.
-[pic 8] and [pic 9]
+Put "http://127.0.0.1:8086" in HTTP/URL input and database name "uWSGI" in "InfluxDB Details/Database" input.
+![New datasource screen in Grafana](https://dev-to-uploads.s3.amazonaws.com/i/qmldpn522ei7f5b4dk0i.png)
+
+Click on "Save and Test" button in the bottom of the screen, green noty reading "Data source is working" should appear.
+![Success new datasource in Grafana](https://dev-to-uploads.s3.amazonaws.com/i/picc491nkgdfc7pdpkth.png)
 
 
-Alternatively, can create panels one by one by hand:
-- Go to "Dashboards -> Manage dashboards", click on "New dashboard"
-- click "New panel" [pic 5].
-In new panel edit mode, select Query source - InfluxDB.
-Modify query builder inputs [as on pic 6]: 
- - From default *uwsgi_workers*
- - Select field(*avg_rt*) mean()
-It is important to tell panel that metric it displays is measured in microseconds, in the right column expand "Axes", "Left Y", "Unit" - "microseconds" [pic 7].
-Also nice to configure points thickness so that you can see them clearly ("Display" - "Line width" in the right column).
-Give some meaningful name to that panel (in top of right column), save panel (click "Apply" in top right corner).
-Panel in real time shows avg request time of all uwsgi workers (make sure refresh frequency selector is set to like 10 sec, tiny dropdown in top right corner of dashboard page).
+### Visualizing uWSGI metrics in Grafana
 
-Now can view uWSGI dashboard at http://localhost:3000/dashboard/new?orgId=1&from=now-15m&to=now&refresh=10s
-The dashboard https://snapshot.raintank.io/dashboard/snapshot/IFfCGXltm0Z6Kz5T65Vf0UGfEsWEaKpN is monitoring following uwsgi metrics:
+Now Grafana can read metrics from database, let's visualize them - add graph panel for each metric.
+
+Grafana dashboard consists of panels, panel can show how particular metric changed in time. There are lots of types of panels but we will only deal with Time Series panel in this tutorial.
+
+Here's [dashboard snapshot](https://snapshot.raintank.io/dashboard/snapshot/IFfCGXltm0Z6Kz5T65Vf0UGfEsWEaKpN) with measurements of hello-world app with 4 workers being loaded by artificial users. That dashboard is monitoring following uwsgi metrics:
 - harakiri count
 - worker status (busy/idle/cheap/total)
 - listen queue size
@@ -271,74 +329,122 @@ The dashboard https://snapshot.raintank.io/dashboard/snapshot/IFfCGXltm0Z6Kz5T65
 - respawn count
 - worker avg request time
 - worker running time
+- load sum
 
-There are more things that can be monitored: amount of transmitted data for worker, amount of exceptions for worker, etc, which I didn't need or monitor in another ways.
-Can also configure memory reporting - how much memory uWSGI consumes. I prefer to watch memory consumption from system monitoring though, along with CPU consumption.
-uWSGI even allows to expose your own metrics - never used this though. https://uwsgi-docs.readthedocs.io/en/latest/Metrics.html 
-Cheaper subsystem plugin has it's own metrics too, it seems.
+There are more things that can be monitored: amount of transmitted data for worker, amount of exceptions for worker, etc. I didn't need these metrics or prefer to monitor them in other ways.
+
+Can also configure [uWSGI memory reporting](https://uwsgi-docs.readthedocs.io/en/latest/Options.html#memory-report) - how much memory uWSGI consumes. I prefer to watch memory consumption from system monitoring though, along with CPU consumption.
+
+uWSGI even allows to [expose your own metrics](https://uwsgi-docs.readthedocs.io/en/latest/Metrics.html).  
+Cheaper subsystem plugin, and other plugins, have their own metrics too.
+
+I am providing instructions on how to **setup all panels at once**, using dashboard JSON, or how to **manually add panels one by one**, and learn a bit more in the process.
+
+#### Manual dashboard setup: add panels one by one
+
+Might be beneficial to read this first [How to add a panel in Grafana](https://grafana.com/docs/grafana/latest/panels/add-a-panel/).
+
+How to create new panel in new dashboard:
+- Go to "Dashboards -> Manage dashboards", click on "New dashboard"
+- click "New panel" or "Add panel" in top right corner
+- on dropdown next to new panel title pick "Edit"
+
+How to populate panel with avg worker request time data:
+In panel edit mode, select Query source - InfluxDB.
+Modify query builder inputs: 
+ - From default *uwsgi_workers*
+ - Select field(*avg_rt*) mean()
+![Edit panel query](https://dev-to-uploads.s3.amazonaws.com/i/a2nexncht47p9ygr09nb.png)
+
+It is important to tell the panel that the metric it displays is measured in microseconds: in the right column, expand "Axes", "Left Y", "Unit" - "microseconds".
+![Edit panel series units](https://dev-to-uploads.s3.amazonaws.com/i/ra7go02d80v4saxghyxx.png)
+
+Also, it's nice to configure points thickness so that you can see them clearly ("Display" - "Line width" in the right column).
+Give a meaningful name to that panel (in top of right column), save panel (click "Apply" in top right corner).
+
+Congrats, now you have a panel that shows avg request time of all uwsgi workers in real time. Make sure that the refresh frequency selector is set to like 10 sec (tiny dropdown in top right corner of dashboard page) and that the webserver, wrk2, telegraf, and InfluxDB are all still running.
+
+Similar process should be repeat for rest of panel - find queries to use below in this post, and can paste queries in panel "edit query" input.
+
+
+#### Automatic dashboard setup: import uWSGI stats dashboard JSON
+
+To setup uWSGI stats monitoring dashboard, can use JSON in [uwsgi-dashboard-model.json](https://github.com/CheViana/uwsgi-playground-monitoring/blob/master/uwsgi-dashboard-model.json), and export that to new dashboard:
+- Go to "Dashboards -> Manage dashboards", click on "New dashboard"
+- Go to Dashboard settings ("wheel" button at the top right of the page with new dashboard)
+- In the left menu, pick "JSON Model"
+- In JSON, find the "panels" field (it should be empty) and paste there contents of field "panels" from [uwsgi-dashboard-model.json](https://github.com/CheViana/uwsgi-playground-monitoring/blob/master/uwsgi-dashboard-model.json). Pasting all JSON doesn't work for me for some reason.
+- Click "Save changes" at the bottom of Dashboard settings page.
+![Export dashboard 1](https://dev-to-uploads.s3.amazonaws.com/i/ap9fsc6djvoayhwqlljw.png)
+![Export dashboard 2](https://dev-to-uploads.s3.amazonaws.com/i/ib3bwuqlwoavqjycn7o7.png)
+
+Congrats, now you have dashboard that shows uWSGI stats in real time. Make sure refresh frequency selector is set to like 10 sec, tiny dropdown in top right corner of dashboard page, and that the webserver, wrk2, telegraf, and InfluxDB are all still running.
 
 ### Grafana specifics: time filter and time interval
 
 `$timeFilter`, seen in panel query builder, stands for time range picked in Grafana UI, the period of time for which you want to see metrics.
-`$__timeInterval`, seen in panel query builder, stands for time interval. Time interval depends on what's current time range you're looking at in dashboard. It's time interval between 2 nearest dots on series. Looking at 1 hour range in dashboard (put from=now-1h&to=now in URL or use time range picker in upper right corner of dashboard) I see dot at 11:01:02 and next dot is 11:01:06 - time interval is 4 seconds.
-Telegraf is configured to send data from uWSGI stats server to InfluxDB every 10 seconds. If time interval is bigger than 10 seconds, one dot in series corresponds to avg/sum/... (set in query which one) of multiple uWSGI stats readings (those that got into time interval).
 
+`$__timeInterval`, seen in panel query builder, stands for time interval. Time interval depends on what's the time range you're looking at in dashboard, meaning the time interval between the two nearest dots on series. Looking at a 1 hour range in dashboard (put `from=now-1h&to=now` in URL or use the time range picker in the upper right corner of dashboard), I see a dot at 11:01:02. The next dot is 11:01:06, so the time interval is 4 seconds.
+
+The time interval is important to use so that the dashboard for a large range (e.g. 30 days) loads in a reasonable amount of time. 
+
+Telegraf is configured to send data from uWSGI stats server to InfluxDB once every 10 seconds. If the time interval is bigger than 10 seconds, one dot in the series corresponds to avg/sum/... (set in query which one) of multiple uWSGI stats readings (those that got into time interval).
 
 ## uWSGI stats - by metric
 
 ### Harakiri count
 
-uWSGI has mechanizm to kill worker if worker executes request for longer than defined time (e.g. 10 sec). It's called "harakiri". To configure it, set uwsgi option `harakiri=10` (in uwsgi.ini), where 10 is time of longest allowed request.
-This option can be used to protect from DDoS attacks that exploit long-executing requests, basically flooding website with long-executing requests to the extend website doesn't have capacity (free workers) to serve usual user traffic, all workers are busy executing attackers long-executing requests.
-Setting low harakirir can bite you if web server is expected to serve rare long-executing requests. So need to analyze what's longest valid request time. Can consider refactoring code to avoid long-executing requests in worker processes (lots of options depending on partical problem, use uWSGI spooler to send emails, use uWSGI mules, or some kind of separate from webserver task queue for long-executing requests, or worse option - use uWSGI routes to enforce different harakiri values depending on URL path). 
+uWSGI has a useful feature, to kill worker if worker executes request for longer than defined time (e.g. 10 sec). It's called "harakiri". To configure it, set uwsgi option `harakiri=10` (in uwsgi.ini), where 10 is the time of the longest allowed request in seconds.
+This option can be used to protect from DDoS attacks that exploit long-executing requests. Such attacks flood a website with long-executing requests to such an extend that the website doesn't have the capacity (free workers) to serve regular user traffic, since all the workers are busy executing attacker's requests.
+Setting low harakiri can bite you if the web server is expected to serve long-executing requests in some rare cases. One needs to analyze what's the longest valid request time. Consider refactoring code to avoid long-executing requests in worker processes. There are lots of options depending on the specifics of the problem: uWSGI spooler to send emails, uWSGI mules, or some kind of task queue for long-executing requests that's separate from the webserver. 
 
-Harakiri panel query is:
+Harakiri panel query is as follows:
 
     SELECT sum("harakiri_count") FROM "uwsgi_workers" WHERE $timeFilter GROUP BY time($__interval) fill(null)
 
-It shows sum of harakiri event for time interval. Time interval depends on what's current time range you're looking at in dashboard. It's time interval between 2 nearest dots on series. Looking at 1 hour range in dashboard (put from=now-1h&to=now in URL or use time range picker in upper right corner of dashboard) I see dot at 11:01:02 and next dot is 11:01:06 - time interval is 4 seconds.
-
+This will shows sum of harakiri event for time interval.
 
 ### Worker status
 
 uWSGI worker can be in few states: 
-- idle (not working on request)
+- idle (not working on a request)
 - busy (working on requests)
 - cheap (see uWSGI cheaper subsystem docs)
 
 I configured Worker status panel to show idle, busy, cheap and total amounts of workers.
-Query is:
+
+Query:
 
     SELECT count("status") FROM "uwsgi_workers" WHERE  $timeFilter and "status"='busy' GROUP BY time($__interval) fill(null)
 
 for "busy" series, for other series replace "busy" with "idle" or "cheap", for total - omit status clause (... WHERE  $timeFilter GROUP BY ...).
 
+Can configure this panel in different way - to show worker busyness in percent for previous period of time. I thought this approach more useful for `uwsgitop` and more confusing when metrics are monitored in time by separate monitoring stack.
 
 ### Listen queue size
 
 If all uWSGI workers are busy working on requests while new requests are arriving, those new ones are first put in queue (socket listen queue) to wait for next free worker.
-Size of listen queue is configurable using option `listen=64` but max allowed value depends on system max socket listen queue size, might need to increase system value first (https://community.webcore.cloud/tutorials/uwsgi_your_server_socket_listen_backlog_is_limited/).
+The size of the listen queue is configurable using the option `listen=64` but max allowed value depends on system max socket listen queue size, so you might need to [increase system value first](https://community.webcore.cloud/tutorials/uwsgi_your_server_socket_listen_backlog_is_limited/).
 
 Panel query is:
 
     SELECT sum("listen_queue") FROM "uwsgi_overview" WHERE $timeFilter GROUP BY time($interval)
 
+### The number of workers
 
-### Workers amount
+The number of workers uWSGI is currently running. Makes more sense when cheaper subsystem is in use, or when cluster has multiple web server instances with scaling (all reporting to same DB) - then this count changes.
 
-Amount of workers uWSGI is currently running. Makes more sense when cheaper subsystem is in use, or when cluster has multiple web server instances with scaling (all reporting to same DB) - then this count changes.
-
-Workers 1-4 amount query: 
+The query to get the number of workers with IDs 1 - 4: 
 
     SELECT count("avg_rt") FROM "uwsgi_workers" WHERE $timeFilter AND ("worker_id"='1' OR "worker_id"='2' OR "worker_id"='3' OR "worker_id"='4') GROUP BY time($__interval) fill(null)
 
-This is indirect metric, it counts how many times `avg_rt` metric was reported for "worker_id"='1' during time interval. It time interval is bigger than 10 sec (telegraf queries uWSGI stats once every 10 sec) - e.g. when time range you're looking at is 6 hours, this actually shows incorrect data. 
-Question to figure out if you're curious and don't mind digging into Grafana docs - how to make it show correct data regardless of chosen time range?
+This is an indirect metric that counts how many times `avg_rt` metric was reported for "worker_id"='1' during the time interval. It the time interval is bigger than 10 sec (telegraf queries uWSGI stats once every 10 sec) - e.g. when time range you're looking at is 6 hours, this actually shows incorrect data. 
+A question to figure out if you're curious and don't mind digging into Grafana docs: how does one make it show correct data regardless of chosen time range? Comment below if you find out.
 
 
 ### Worker requests
 
-How much requests one worker has executed since worker process was started. When webserver serves requests, this measurement rises smoothly. When worker restarts, it falls to zero.
+How much requests one worker has executed since worker process was started. When webserver serves requests, this measurement rises smoothly. When a worker restarts, it falls to zero.
 
 Query is:
 
@@ -347,58 +453,65 @@ Query is:
 
 ### In-request sum
 
-How many requests uWSGI is working on right now (across all workers, sum for time interval).
+How many requests uWSGI is working on right now, across all workers, sum for time interval.
+
 Query:
 
     SELECT sum("in_request") FROM "uwsgi_cores" WHERE $timeFilter GROUP BY time($interval)
 
-
 ### Respawn count
 
-How many times workers were respawned.
-For production system it's recommended to gracefully respawn uwsgi workers after some time, to avoid execessive memory consumption of long-living processes, etc.
+Query:
 
-To limit amount of executed requets after which to respawn, add in options:
+    SELECT sum("respawn_count") FROM "uwsgi_workers" WHERE $timeFilter GROUP BY time($interval), "uwsgi_host"
+
+How many times workers were respawned since uWSGI start.
+
+For production system it's recommended to gracefully respawn uwsgi workers after some time, to avoid excessive memory consumption of long-living processes, etc.
+
+To limit amount of executed requests after which to respawn, add in uWSGI options:
 
     max-requests=10000
     max-requests-delta=1000
 
-This will respawn worker after 10000+-1000 requests. Delta is random value added to/substracted from max-requests, used not to respawn all workers at the same time.
+This will respawn worker after 10000+-1000 requests. Delta is a random value added to/substracted from max-requests. Its purpose is not to respawn all workers at the same time.
 
-To limit amount of time passed after which to respawn, add in options:
+To limit the amount of time passed after which to respawn, add in options:
 
     max-worker-lifetime=36000
     max-worker-lifetime-delta=3600
 
-Values are in sec. This will respawn worker after 10h+-1h of time passed since last respawn. Delta is random value added to/substracted from max-lifetime, used not to respawn all workers at the same time.
+Lifetime values are in sec. This will respawn a worker if 10h+-1h of time has passed since last respawn. Delta is a random value added to/substracted from max-lifetime used in order to not respawn all workers at the same time.
 
-Can use both limits, which one occurs first for particular worker will take effect.
+One can use both limits together; whichever one occurs first for particular worker will take effect.
 
-Query;
-
-    SELECT sum("respawn_count") FROM "uwsgi_workers" WHERE $timeFilter GROUP BY time($interval), "uwsgi_host"
-
-
-### Worker avg request time
-
-Amount of time worker spends on request, on avg. 
+### Worker avg request time 
 
 Query:
 
     SELECT mean("avg_rt") FROM "uwsgi_workers" WHERE $timeFilter GROUP BY time($__interval), "worker_id" fill(null)
 
+Amount of time worker spends on request, on average, per each worker.
 
-
-### Worker running time
-
-How long is worker running, time since last respawn. 
+### Worker running time 
 
 Query:
 
     SELECT mean("running_time") FROM "uwsgi_workers" WHERE  $timeFilter GROUP BY time($interval), "worker_id"
 
+How long is worker running; time since the last respawn.
 
+### Load sum
+
+Query:
+ 
+    SELECT sum("load") FROM "uwsgi_overview" WHERE $timeFilter GROUP BY time($interval)
+
+I am 100% sure but this is something like amount of incoming requests minus outgoing responses. It rises dramatically when web server is overloading, and usually is zero.
 
 ## Conclusions
 
-...
+At this point, we have a basic uWSGI web server and a monitored playground to watch over it while we experiment with uWSGI configurations.
+
+I encourage you to try out the effects of changing uWSGI options on the web server. Start by setting `max-requests=10` in `uwsgi.ini` and compare how that changes stats for web server under load. You can also check how it affects the results seen in load tool (wrk2) summary. 
+
